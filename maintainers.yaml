@@ -1,0 +1,16 @@
+admin:
+  max-assigned-issues: 10
+  max-opened-prs: 5
+  unassign-others: true
+maintainer:
+  max-assigned-issues: 5
+  max-opened-prs: 3
+  unassign-others: false
+developer:
+  max-assigned-issues: 3
+  max-opened-prs: 2
+  unassign-others: false
+default:
+  max-assigned-issues: 1
+  max-opened-prs: 1
+  unassign-others: false
