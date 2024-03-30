@@ -1,6 +1,8 @@
 import yaml from 'js-yaml'
 import { Octokit } from '@octokit/rest'
 import { NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
 
 const octokit = new Octokit({
   auth: process.env.KDB_BOT_GITHUB_TOKEN,
@@ -16,26 +18,13 @@ type RolesConfig = {
   [role: string]: RoleConfig
 }
 
-const loadRolesConfig = async (): Promise<RolesConfig> => {
+const loadRolesConfig = (): RolesConfig => {
   try {
-    const config = yaml.load(`
-    admin:
-      max-assigned-issues: 10
-      max-opened-prs: 5
-      unassign-others: true
-    maintainer:
-      max-assigned-issues: 5
-      max-opened-prs: 3
-      unassign-others: false
-    developer:
-      max-assigned-issues: 3
-      max-opened-prs: 2
-      unassign-others: false
-    default:
-      max-assigned-issues: 1
-      max-opened-prs: 1
-      unassign-others: false
-    `) as RolesConfig
+    const fileName = 'roles.yaml'
+    const pathToFile = path.resolve('./public', fileName)
+    const configFile = fs.readFileSync(pathToFile, 'utf8')
+
+    const config = yaml.load(configFile) as RolesConfig
     console.log('Loaded roles config:', config)
     return config
   } catch (error) {
