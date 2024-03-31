@@ -1,41 +1,22 @@
 import yaml from 'js-yaml'
-import { Octokit } from '@octokit/rest'
+import octokit from '@/lib/octokit'
 import { NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
+import {
+  CountAssignedIssues,
+  GetCommentorRole,
+  GitHubIssueEvent,
+  RolesConfig,
+} from '@/types'
 
-const octokit = new Octokit({
-  auth: process.env.KDB_BOT_GITHUB_TOKEN,
-})
-
-type RoleConfig = {
-  maxAssignedIssues: number
-  maxOpenedPrs: number
-  unassignOthers: boolean
-}
-
-type RolesConfig = {
-  [role: string]: RoleConfig
-}
-
-const loadRolesConfig = async (): Promise<RolesConfig> => {
+const loadRolesConfig = (): RolesConfig => {
   try {
-    const config = yaml.load(`
-    admin:
-      max-assigned-issues: 10
-      max-opened-prs: 5
-      unassign-others: true
-    maintainer:
-      max-assigned-issues: 5
-      max-opened-prs: 3
-      unassign-others: false
-    developer:
-      max-assigned-issues: 3
-      max-opened-prs: 2
-      unassign-others: false
-    default:
-      max-assigned-issues: 1
-      max-opened-prs: 1
-      unassign-others: false
-    `) as RolesConfig
+    const fileName = 'roles.yaml'
+    const pathToFile = path.resolve('./public', fileName)
+    const configFile = fs.readFileSync(pathToFile, 'utf8')
+
+    const config = yaml.load(configFile) as RolesConfig
     console.log('Loaded roles config:', config)
     return config
   } catch (error) {
@@ -44,11 +25,11 @@ const loadRolesConfig = async (): Promise<RolesConfig> => {
   }
 }
 
-async function countAssignedIssues(
-  owner: string,
-  repo: string,
-  username: string
-) {
+const countAssignedIssues: CountAssignedIssues = async (
+  owner,
+  repo,
+  username
+) => {
   try {
     const { data } = await octokit.search.issuesAndPullRequests({
       q: `repo:${owner}/${repo} assignee:${username} is:issue is:open`,
@@ -60,11 +41,7 @@ async function countAssignedIssues(
   }
 }
 
-async function getCommentorRole(
-  owner: string,
-  repo: string,
-  username: string
-): Promise<string> {
+const getCommentorRole: GetCommentorRole = async (owner, repo, username) => {
   try {
     const { data } = await octokit.repos.getCollaboratorPermissionLevel({
       owner,
@@ -78,50 +55,51 @@ async function getCommentorRole(
   }
 }
 
+// initialize roles config and assign/unassign regex
+const rolesConfig = loadRolesConfig()
+const assignRegex = /^\/assign\s+@(\w+)/
+const unassignRegex = /^\/unassign\s+@(\w+)/
+
 export async function POST(request: Request) {
-  const rolesConfig = await loadRolesConfig()
-  console.log('------------------Received a new comment------------------')
-  const payload = await request.json()
-  const commentBody = await payload.comment.body
-  const assignRegex = /^\/assign\s+@(\w+)/
-  const unassignRegex = /^\/unassign\s+@(\w+)/
+  const payload = (await request.json()) as GitHubIssueEvent
+  const commentBody = payload.comment.body
+  const usernameCommented = payload.comment.user.login
+  const issueNumber = payload.issue.number
+  const owner = payload.repository.owner.login
+  const repo = payload.repository.name
 
   // Check if comment is an assign command
   if (assignRegex.test(commentBody)) {
     const matches = commentBody.match(assignRegex)
     if (matches) {
       const username = matches[1] // Extracted username from the command
-      const issueNumber = payload.issue.number
-      const owner = payload.repository.owner.login
-      const repo = payload.repository.name
-
       try {
-        const commentorRole = await getCommentorRole(owner, repo, username)
+        const commentorRole = await getCommentorRole(
+          owner,
+          repo,
+          usernameCommented
+        )
         const roleConfig = rolesConfig[commentorRole] || rolesConfig['default']
         const assignedIssuesCount = await countAssignedIssues(
           owner,
           repo,
           username
         )
-        if (assignedIssuesCount >= roleConfig.maxAssignedIssues) {
+        if (commentorRole === 'default') {
           await octokit.rest.issues.createComment({
             owner,
             repo,
             issue_number: issueNumber,
-            body: `Sorry @${username}, you have already reached the maximum number of issues assigned to you. Please unassign yourself from some of the issues and try again.`,
+            body: `Sorry @${usernameCommented}, you don't have permission to assign issues`,
           })
-        } else if (commentorRole === 'default') {
+        } else if (assignedIssuesCount >= roleConfig.maxAssignedIssues) {
           await octokit.rest.issues.createComment({
             owner,
             repo,
             issue_number: issueNumber,
-            body: `Sorry @${username}, you don't have permission to assign issues. Please ask a maintainer to assign you.`,
+            body: `Sorry ${usernameCommented}, you can't assign ${username} to this issue because they already have ${assignedIssuesCount} open issues assigned in ${repo}.`,
           })
         } else {
-          console.log(
-            `@${username} has the role of ${commentorRole} in ${repo}`
-          )
-          // Add assignee to the issue
           await octokit.rest.issues.addAssignees({
             owner,
             repo,
@@ -129,8 +107,6 @@ export async function POST(request: Request) {
             assignees: [username],
           })
           console.log(`Assigned @${username} to issue #${issueNumber}`)
-
-          // Add label to the issue
           const labelResponse = await octokit.rest.issues.addLabels({
             owner,
             repo,
@@ -142,42 +118,32 @@ export async function POST(request: Request) {
               (label) => label.name
             )}`
           )
-
-          // print the count of assigned issues of user
-          await new Promise((resolve) => setTimeout(resolve, 2000))
-          const count = await countAssignedIssues(owner, repo, username)
-          console.log(
-            `@${username} now has ${count} open issues assigned in ${repo}`
-          )
         }
       } catch (error) {
         console.error(
           `Failed to assign @${username} to issue #${issueNumber}: ${error}`
         )
       }
+    } else {
+      console.error('Failed to match assign regex')
     }
     return NextResponse.json({ status: 'success' })
   } else if (unassignRegex.test(commentBody)) {
     const matches = commentBody.match(unassignRegex)
     if (matches) {
-      const usernameWhichCommented = payload.comment.user.login
       const usernameToBeUnassigned = matches[1] // Extracted username from the command
-      const issueNumber = payload.issue.number
-      const owner = payload.repository.owner.login
-      const repo = payload.repository.name
-
       try {
         const commentorRole = await getCommentorRole(
           owner,
           repo,
-          usernameWhichCommented
+          usernameCommented
         )
         if (commentorRole !== 'admin') {
           await octokit.rest.issues.createComment({
             owner,
             repo,
             issue_number: issueNumber,
-            body: `Sorry @${usernameWhichCommented}, you don't have permission to unassign issues. Please ask a maintainer to unassign you.`,
+            body: `Sorry @${usernameCommented}, you don't have permission to unassign issues`,
           })
         } else {
           await octokit.rest.issues.removeAssignees({
@@ -219,8 +185,12 @@ export async function POST(request: Request) {
           `Failed to assign @${usernameToBeUnassigned} to issue #${issueNumber}: ${error}`
         )
       }
+    } else {
+      console.error('Failed to match unassign regex')
     }
     return NextResponse.json({ status: 'success' })
+  } else {
+    console.error('Failed to match assign/unassign regex')
   }
   return NextResponse.json({ status: 'error' })
 }
