@@ -1,0 +1,24 @@
+name: Issue Assignment Workflow
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  assign_issue:
+    if: contains(github.event.comment.body, '/assign @')
+    runs-on: ubuntu-latest
+    steps:
+    - name: Extract Assignee Username
+      id: extract-username
+      run: |
+        echo "Extracting username..."
+        USERNAME=$(echo "${{ github.event.comment.body }}" | grep -oP "/assign @\K(\w+)")
+        echo "::set-output name=username::$USERNAME"
+    - name: Calling our deployed API
+      run: |
+        curl -X POST "https://kdb-bot.vercel.app/" \
+        -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+        -d '{"issue_number": "${{ github.event.issue.number }}", "assignee": "${{ steps.extract-username.outputs.username }}"}'
+      env:
+        GITHUB_TOKEN: ${{ secrets.BOT_TOKEN }}
